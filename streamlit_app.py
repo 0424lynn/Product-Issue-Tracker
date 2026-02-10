@@ -514,8 +514,9 @@ def tab_settings():
         with b2:
             if st.button("🗑️ 删除该严重程度", key="btn_sev_del"):
                 delete_row_by_rownum(TAB_SEV, row_num)
-                st.success("已删除")
                 bump_ver("v_sev"); bump_ver("v_issues")
+                st.session_state["toast"] = f"✅ 已删除严重程度：{pick}"
+                st.query_params["tab"] = "settings"
                 st.rerun()
 
     st.markdown("---")
@@ -932,24 +933,53 @@ def tab_edit():
             bump_ver("v_issues")
             st.success("已删除")
             st.rerun()
-
+qp = st.query_params
+cur = qp.get("tab", "list")
 def main():
     page_config()
+
+    # ✅ toast（跨 rerun 仍能显示）
+    msg = st.session_state.pop("toast", None)
+    if msg:
+        st.toast(msg)
 
     # ✅ bootstrap 只在本次会话第一次运行
     if "bootstrapped" not in st.session_state:
         bootstrap()
         st.session_state["bootstrapped"] = True
 
-    tabs = st.tabs(["📋 查询列表", "➕ 新增问题", "✏️ 编辑问题", "⚙️ 配置"])
-    with tabs[0]:
+    # ✅ 读取当前 tab（从 URL query）
+    qp = st.query_params
+    cur = qp.get("tab", "list")
+    if cur not in ["list", "new", "edit", "settings"]:
+        cur = "list"
+
+    # ✅ 导航（替代 st.tabs，避免 rerun 回到第一个 tab）
+    tab = st.radio(
+        "导航",
+        ["list","new","edit","settings"],
+        format_func=lambda x: {
+            "list":"📋 查询列表",
+            "new":"➕ 新增问题",
+            "edit":"✏️ 编辑问题",
+            "settings":"⚙️ 配置"
+        }[x],
+        index=["list","new","edit","settings"].index(cur),
+        horizontal=True,
+        key="nav_tab",
+    )
+    st.query_params["tab"] = tab
+
+    # ✅ 渲染页面
+    if tab == "list":
         tab_list()
-    with tabs[1]:
+    elif tab == "new":
         tab_new()
-    with tabs[2]:
+    elif tab == "edit":
         tab_edit()
-    with tabs[3]:
+    else:
         tab_settings()
+
 
 if __name__ == "__main__":
     main()
