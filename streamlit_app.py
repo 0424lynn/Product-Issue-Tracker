@@ -62,6 +62,17 @@ ISSUE_HEADERS = [
     "ImageLinks",
     "UpdatedAt",
 ]
+# === Issue Progress Updates (log table) ===
+TAB_UPDATES = "issue_updates"
+
+UPDATES_HEADERS = [
+    "IssueID",
+    "UpdateAt",
+    "Status",
+    "Note",
+    "NextStep",
+    "UpdatedBy",
+]
 
 MS_TENANT_ID = st.secrets["MS_TENANT_ID"]
 MS_CLIENT_ID = st.secrets["MS_CLIENT_ID"]
@@ -116,6 +127,10 @@ def _first_url(s: str) -> str:
         if p.lower().startswith(("http://", "https://")):
             return p
     return ""
+
+def _preview_text(s: str, n: int = 80) -> str:
+    t = str(s or "").strip().replace("\n", " ")
+    return (t[:n] + "…") if len(t) > n else t
 
 def _retry_http(fn, *, tries=6, base_sleep=0.8):
     """
@@ -294,12 +309,56 @@ def replace_value_in_column(tab: str, col_name: str, old: str, new: str) -> int:
 
     if not to_update:
         return 0
-
     cells = [gspread.cell.Cell(row=r, col=c, value=new) for (r, c) in to_update]
     _retry_gspread(lambda: ws.update_cells(cells))
     invalidate_cache()
     return len(to_update)
 
+# =========================
+# Issue update helpers (progress / timeline)
+# =========================
+
+@st.cache_data(ttl=120)
+def load_updates(_v: int = 0) -> pd.DataFrame:
+    dfu = load_df(TAB_UPDATES, _v)
+    if dfu.empty:
+        return dfu
+    dfu["UpdateAt_dt"] = pd.to_datetime(dfu.get("UpdateAt", ""), errors="coerce")
+    return dfu
+
+
+def latest_update_map(dfu: pd.DataFrame) -> Dict[str, dict]:
+    """
+    return:
+    {
+        IssueID: {
+            "LastUpdateAt": "...",
+            "LastStatus": "...",
+            "LastNote": "...",
+            "LastNextStep": "..."
+        }
+    }
+    """
+    if dfu is None or dfu.empty:
+        return {}
+
+    dfu2 = dfu.copy()
+    dfu2["IssueID"] = dfu2["IssueID"].astype(str).str.strip()
+    dfu2 = dfu2.sort_values("UpdateAt_dt", ascending=False)
+
+    out = {}
+    for _, r in dfu2.iterrows():
+        iid = str(r.get("IssueID", "")).strip()
+        if not iid or iid in out:
+            continue
+
+        out[iid] = {
+            "LastUpdateAt": str(r.get("UpdateAt", "")).strip(),
+            "LastStatus": str(r.get("Status", "")).strip(),
+            "LastNote": str(r.get("Note", "")).strip(),
+            "LastNextStep": str(r.get("NextStep", "")).strip(),
+        }
+    return out
 
 # =========================
 # Graph / SharePoint helpers
@@ -510,7 +569,7 @@ def bootstrap():
     ensure_headers(TAB_SEV, ["Severity"])
     ensure_headers(TAB_MODELS, ["Model", "Category"])
     ensure_headers(TAB_CFG, ["Key", "Value"])
-
+    ensure_headers(TAB_UPDATES, UPDATES_HEADERS)
     # Optional default seeds (edit as needed)
     if load_df(TAB_CATS, ver("v_cats")).empty:
         ws = get_or_create_ws(TAB_CATS)
@@ -913,13 +972,38 @@ def tab_list():
     view_show = view.copy()
     view_show["ImageLink"] = view_show.get("ImageLinks", "").apply(_first_url)
     view_show.loc[view_show["ImageLink"].astype(str).str.strip().eq(""), "ImageLink"] = None
+    view_show["DescriptionPreview"] = view_show.get("Description", "").apply(lambda x: _preview_text(x, 80))
+    # ===== Merge latest updates (progress tracking) =====
+    dfu = load_updates(ver("v_updates"))
+    lu = latest_update_map(dfu)
+
+    view_show["LastUpdateAt"] = view_show["IssueID"].astype(str).map(
+        lambda x: lu.get(str(x).strip(), {}).get("LastUpdateAt", "")
+    )
+
+    view_show["LastNotePreview"] = view_show["IssueID"].astype(str).map(
+        lambda x: _preview_text(
+            lu.get(str(x).strip(), {}).get("LastNote", ""), 60
+        )
+    )
+
+    view_show["LastNextStepPreview"] = view_show["IssueID"].astype(str).map(
+        lambda x: _preview_text(
+            lu.get(str(x).strip(), {}).get("LastNextStep", ""), 60
+        )
+    )
 
     show_cols = [
         "IssueID","ProductCategory","Model","IssueName",
+        "DescriptionPreview",
         "Severity","IssueType","Status",
+        "LastUpdateAt",
+        "LastNotePreview",
+        "LastNextStepPreview",
         "CreatedAt","ImplementDate","UpdatedAt",
         "ImageLink",
     ]
+
     show_cols = [c for c in show_cols if c in view_show.columns]
 
     st.dataframe(
@@ -927,6 +1011,22 @@ def tab_list():
         use_container_width=True,
         hide_index=True,
         column_config={
+            "DescriptionPreview": st.column_config.TextColumn(
+                "Description (Preview)",
+                help="Short preview of Description. Use 'View Single Record' to see full text.",
+            ),
+            "LastUpdateAt": st.column_config.TextColumn(
+                "Last Update",
+                help="Latest progress update timestamp.",
+            ),
+            "LastNotePreview": st.column_config.TextColumn(
+                "Latest Note",
+                help="Latest progress note (preview).",
+            ),
+            "LastNextStepPreview": st.column_config.TextColumn(
+                "Next Step",
+                help="Latest next step (preview).",
+            ),
             "ImageLink": st.column_config.LinkColumn(
                 "Image Link",
                 display_text="Open",
@@ -935,8 +1035,10 @@ def tab_list():
         },
     )
 
+
     st.markdown("### 🔍 View Single Record (Enter IssueID)")
     pick = st.text_input("IssueID", key="pick_issueid")
+
     if pick.strip():
         m = df[df["IssueID"].astype(str) == pick.strip()]
         if m.empty:
@@ -961,6 +1063,73 @@ def tab_list():
                 st.markdown("### Image / Attachment Links")
                 for lk in [x.strip() for x in links.split(";") if x.strip()]:
                     st.markdown(f"- [Open]({lk})")
+    # --- Progress History (MUST be inside pick.strip()) ---
+    dfu = load_updates(ver("v_updates"))
+    hist = dfu[dfu["IssueID"].astype(str).str.strip() == pick.strip()].copy()
+    if not hist.empty:
+        hist["UpdateAt_dt"] = pd.to_datetime(hist.get("UpdateAt",""), errors="coerce")
+        hist = hist.sort_values("UpdateAt_dt", ascending=False)
+
+        st.markdown("### Progress History")
+        for _, rr in hist.iterrows():
+            st.markdown(
+                f"- **{rr.get('UpdateAt','')}** | **{rr.get('Status','')}** | {rr.get('Note','')}"
+            )
+            ns = str(rr.get("NextStep","") or "").strip()
+            if ns:
+                st.caption(f"Next: {ns}")
+    else:
+        st.caption("No progress updates yet.")
+               
+    st.markdown("### ⚡ Quick Update (Add Progress Log)")
+
+    ids = sorted(df["IssueID"].astype(str).dropna().unique().tolist())
+    colu1, colu2, colu3 = st.columns([1.2, 1.0, 1.0])
+
+    with colu1:
+        upd_issue = st.selectbox("Select IssueID", [""] + ids, key="quick_upd_issue")
+    with colu2:
+        upd_status = st.selectbox("New Status", STATUS_OPTIONS, key="quick_upd_status")
+    with colu3:
+        upd_by = st.text_input("Updated By (optional)", value="", key="quick_upd_by")
+
+    upd_note = st.text_area("Update Note", height=100, key="quick_upd_note")
+    upd_next = st.text_input("Next Step (optional)", value="", key="quick_upd_next")
+
+    if st.button("✅ Save Update", key="btn_quick_save_update"):
+        if not upd_issue.strip():
+            st.error("Please select an IssueID."); st.stop()
+        if not upd_note.strip():
+            st.error("Please enter an update note."); st.stop()
+
+        now_ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+        # 1) append to issue_updates
+        append_row(
+            TAB_UPDATES,
+            UPDATES_HEADERS,
+            {
+                "IssueID": upd_issue.strip(),
+                "UpdateAt": now_ts,
+                "Status": upd_status,
+                "Note": upd_note.strip(),
+                "NextStep": upd_next.strip(),
+                "UpdatedBy": upd_by.strip(),
+            }
+        )
+
+        # 2) also update main issues table: Status + UpdatedAt (and optionally ImplementDate)
+        df_rows = load_df_with_row(TAB_ISSUES, ver("v_issues"))
+        hit = df_rows[df_rows["IssueID"].astype(str) == upd_issue.strip()]
+        if not hit.empty:
+            row_num = int(hit.iloc[0]["_row"])
+            update_cell_by_row(TAB_ISSUES, row_num, "Status", upd_status)
+            update_cell_by_row(TAB_ISSUES, row_num, "UpdatedAt", now_ts)
+
+        bump_ver("v_updates")
+        bump_ver("v_issues")
+        st.success("✅ Update saved.")
+        st.rerun()
 
 
 def tab_edit():
