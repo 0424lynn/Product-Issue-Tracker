@@ -75,6 +75,13 @@ def bump_ver(key: str):
 def ver(key: str) -> int:
     return int(st.session_state.get(key, 0))
 
+def invalidate_cache():
+    # 让下一次 load_df / load_df_with_row 必定重新从 Google Sheet 读取
+    try:
+        st.cache_data.clear()
+    except Exception:
+        pass
+
 # =========================
 # GSpread retry helper
 # =========================
@@ -175,9 +182,10 @@ def load_df(tab: str, _v: int = 0) -> pd.DataFrame:
 def append_row(tab: str, headers: List[str], row: dict):
     ws = get_or_create_ws(tab)
     ensure_headers(tab, headers)
-    # 读取当前表头（可能比 headers 多，因为我们允许补列）
     header_now = _retry_gspread(lambda: ws.row_values(1))
     _retry_gspread(lambda: ws.append_row([row.get(h, "") for h in header_now]))
+
+    invalidate_cache()  # ✅ 关键：写完立刻让读缓存失效
 
 def kv_get(key: str) -> Optional[str]:
     df = load_df(TAB_CFG, ver("v_cfg"))
@@ -231,10 +239,12 @@ def update_cell_by_row(tab: str, row_num: int, col_name: str, value: str):
     if not ci:
         raise ValueError(f"Column not found: {col_name}")
     _retry_gspread(lambda: ws.update_cell(row_num, ci, value))
+    invalidate_cache()  # ✅
 
 def delete_row_by_rownum(tab: str, row_num: int):
     ws = get_or_create_ws(tab)
     _retry_gspread(lambda: ws.delete_rows(row_num))
+    invalidate_cache()  # ✅
 
 def replace_value_in_column(tab: str, col_name: str, old: str, new: str) -> int:
     ws = get_or_create_ws(tab)
@@ -258,6 +268,7 @@ def replace_value_in_column(tab: str, col_name: str, old: str, new: str) -> int:
 
     cells = [gspread.cell.Cell(row=r, col=c, value=new) for (r, c) in to_update]
     _retry_gspread(lambda: ws.update_cells(cells))
+    invalidate_cache()  # ✅
     return len(to_update)
 
 # =========================
@@ -378,10 +389,18 @@ def page_config():
 
 def tab_settings():
     st.subheader("⚙️ 配置")
+
+    # 🔄 手动强制刷新（解决 Sheet 已删但系统还显示的问题）
+    if st.button("🔄 强制刷新（重新从 Sheet 读取）", key="btn_force_refresh"):
+        invalidate_cache()
+        st.toast("缓存已清空，已重新从 Google Sheet 读取")
+        st.rerun()
+
     folder_id = get_or_create_folder()
     st.info(f"✅ 图片默认文件夹：{DEFAULT_FOLDER_NAME} （folder_id={folder_id}）")
 
     sync_update = st.checkbox("改名时同步更新关联数据（推荐）", value=True)
+
 
     def _flush(*keys):
         for k in keys:
@@ -933,8 +952,7 @@ def tab_edit():
             bump_ver("v_issues")
             st.success("已删除")
             st.rerun()
-qp = st.query_params
-cur = qp.get("tab", "list")
+
 def main():
     page_config()
 
