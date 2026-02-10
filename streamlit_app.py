@@ -45,7 +45,7 @@ TAB_SEV = "severities"
 TAB_MODELS = "models"
 TAB_CFG = "app_config"
 
-DEFAULT_FOLDER_NAME = "1dWCNP0ReJq_20ZWr0GUDzbcgO68ek_9k"
+DEFAULT_FOLDER_NAME = "Product-Issue-Images"
 
 STATUS_OPTIONS = ["未完成", "待实施", "已完成"]
 
