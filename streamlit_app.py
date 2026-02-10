@@ -95,7 +95,6 @@ def invalidate_cache():
     except Exception:
         pass
 
-
 # =========================
 # Retry helpers (GSpread + Graph)
 # =========================
@@ -112,6 +111,18 @@ def _retry_gspread(fn, *, tries=5, base_sleep=0.7):
                 continue
             raise
     raise last
+
+def _first_url(s: str) -> str:
+    if s is None:
+        return ""
+    text = str(s).strip()
+    if not text:
+        return ""
+    parts = [p.strip() for p in text.split(";") if p.strip()]
+    for p in parts:
+        if p.lower().startswith(("http://", "https://")):
+            return p
+    return ""
 
 def _retry_http(fn, *, tries=6, base_sleep=0.8):
     """
@@ -910,7 +921,32 @@ def tab_list():
         "CreatedAt","ImplementDate","UpdatedAt","ImageLinks"
     ]
     show_cols = [c for c in show_cols if c in view.columns]
-    st.dataframe(view[show_cols], use_container_width=True, hide_index=True)
+    # --- 让 ImageLinks 在表格里可点击 ---
+    view_show = view.copy()
+    view_show["ImageLink"] = view_show.get("ImageLinks", "").apply(_first_url)
+
+    show_cols = [
+        "IssueID","ProductCategory","Model","IssueName",
+        "Severity","IssueType","Status",
+        "CreatedAt","ImplementDate","UpdatedAt",
+        "ImageLink",      # ✅ 新增：可点击
+        "ImageLinks",     # 可选：保留原始多链接文本（想干净就删掉）
+    ]
+    show_cols = [c for c in show_cols if c in view_show.columns]
+
+    st.dataframe(
+        view_show[show_cols],
+        use_container_width=True,
+        hide_index=True,
+        column_config={
+            "ImageLink": st.column_config.LinkColumn(
+                "图片链接",
+                display_text="打开",
+                help="点击打开 SharePoint 图片/附件（取 ImageLinks 的第一个链接）",
+            ),
+        },
+    )
+
 
     st.markdown("### 🔍 查看单条详情（输入 IssueID）")
     pick = st.text_input("IssueID", key="pick_issueid")
@@ -933,7 +969,7 @@ def tab_list():
             if links:
                 st.markdown("### 图片/附件链接")
                 for lk in [x.strip() for x in links.split(";") if x.strip()]:
-                    st.markdown(f"- {lk}")
+                    st.markdown(f"- [打开]({lk})")
 
 
 def tab_edit():
