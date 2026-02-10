@@ -1,8 +1,8 @@
 # -*- coding: utf-8 -*-
 """
-Product Issue Tracker (Standalone)
+Product Issue Tracker (Standalone) - SharePoint Images Version
 - Google Sheet as DB
-- Google Drive folder for images (auto create)
+- SharePoint Document Library folder for images (auto ensure folder)
 - IssueID: ISS-YYYYMMDD-0001
 
 ✅ 配置页支持：新增 / 编辑改名 / 删除（产品分类、问题分类、严重程度、型号）
@@ -10,6 +10,7 @@ Product Issue Tracker (Standalone)
 ✅ 修复 429：减少读请求 + 429 退避重试 + bootstrap 只执行一次 + 局部刷新缓存
 ✅ 新增“状态”字段：未完成 / 待实施 / 已完成
 ✅ 新增“编辑问题”页面：可编辑并保存状态等字段
+✅ 图片存储：SharePoint（自动发现 drive_id，无需手动填 SP_DRIVE_ID）
 """
 
 import re
@@ -17,24 +18,24 @@ import io
 import json
 import time
 from datetime import datetime, date
-from typing import Optional, List
+from typing import Optional, List, Dict
 
 import streamlit as st
 import pandas as pd
 import gspread
 from gspread.exceptions import APIError
 from google.oauth2.service_account import Credentials
-from googleapiclient.discovery import build
-from googleapiclient.http import MediaIoBaseUpload
+
+import requests
 
 # =========================
 # Settings
 # =========================
 SPREADSHEET_ID = st.secrets["GSHEET_SPREADSHEET_ID"]
 
+# Google Sheets scopes
 SCOPES = [
     "https://www.googleapis.com/auth/spreadsheets",
-    "https://www.googleapis.com/auth/drive",
 ]
 
 # Tabs
@@ -44,8 +45,6 @@ TAB_TYPES = "issue_types"
 TAB_SEV = "severities"
 TAB_MODELS = "models"
 TAB_CFG = "app_config"
-
-DEFAULT_FOLDER_NAME = "Product-Issue-Images"
 
 STATUS_OPTIONS = ["未完成", "待实施", "已完成"]
 
@@ -59,12 +58,27 @@ ISSUE_HEADERS = [
     "Description",
     "TempFix",
     "ImprovePlan",
-    "Status",          # ✅ 新增
+    "Status",
     "CreatedAt",
     "ImplementDate",
     "ImageLinks",
     "UpdatedAt",
 ]
+
+# SharePoint / Graph settings
+MS_TENANT_ID = st.secrets["MS_TENANT_ID"]
+MS_CLIENT_ID = st.secrets["MS_CLIENT_ID"]
+MS_CLIENT_SECRET = st.secrets["MS_CLIENT_SECRET"]
+
+# ✅ 你已提供 SP_SITE_ID（最稳）。若不想填，也可改用 hostname/sitePath 自动发现（此处先保留扩展）
+SP_SITE_ID = st.secrets.get("SP_SITE_ID", "").strip()
+
+# 图片放在这个 SharePoint 文件夹下（在 Shared Documents/ 里）
+SP_BASE_FOLDER = st.secrets.get("SP_BASE_FOLDER", "Product-Issue-Images").strip()
+
+# createLink scope：organization(公司内可看) / anonymous(任何人可看，慎用)
+SP_LINK_SCOPE = st.secrets.get("SP_LINK_SCOPE", "organization").strip()  # organization recommended
+
 
 # =========================
 # Small versioning (local refresh)
@@ -76,19 +90,16 @@ def ver(key: str) -> int:
     return int(st.session_state.get(key, 0))
 
 def invalidate_cache():
-    # 让下一次 load_df / load_df_with_row 必定重新从 Google Sheet 读取
     try:
         st.cache_data.clear()
     except Exception:
         pass
 
+
 # =========================
-# GSpread retry helper
+# Retry helpers (GSpread + Graph)
 # =========================
 def _retry_gspread(fn, *, tries=5, base_sleep=0.7):
-    """
-    遇到 429（读配额）时做退避重试，避免直接报错
-    """
     last = None
     for i in range(tries):
         try:
@@ -102,39 +113,61 @@ def _retry_gspread(fn, *, tries=5, base_sleep=0.7):
             raise
     raise last
 
+def _retry_http(fn, *, tries=6, base_sleep=0.8):
+    """
+    Graph / HTTP 429 / 503 退避重试
+    fn() 需要返回 requests.Response
+    """
+    last_exc = None
+    for i in range(tries):
+        try:
+            r = fn()
+            if r.status_code in (429, 503, 504):
+                # Graph 可能给 Retry-After
+                ra = r.headers.get("Retry-After")
+                if ra:
+                    try:
+                        time.sleep(float(ra))
+                        continue
+                    except Exception:
+                        pass
+                time.sleep(base_sleep * (2 ** i))
+                continue
+            return r
+        except Exception as e:
+            last_exc = e
+            time.sleep(base_sleep * (2 ** i))
+            continue
+    if last_exc:
+        raise last_exc
+    raise RuntimeError("HTTP retry failed")
+
+
 # =========================
-# Clients
+# Google Sheet clients
 # =========================
 @st.cache_resource
-def get_creds():
+def get_gs_creds():
     raw = st.secrets["GCP_SERVICE_ACCOUNT_JSON"]
     info = json.loads(raw) if isinstance(raw, str) else dict(raw)
     return Credentials.from_service_account_info(info, scopes=SCOPES)
 
 @st.cache_resource
 def gs_client():
-    return gspread.authorize(get_creds())
+    return gspread.authorize(get_gs_creds())
 
 @st.cache_resource
 def gsheet():
     return gs_client().open_by_key(SPREADSHEET_ID)
 
 @st.cache_resource
-def drive():
-    return build("drive", "v3", credentials=get_creds())
-
-@st.cache_resource
 def ws_cache():
-    """
-    Worksheet 对象缓存（避免反复 worksheet(name) 触发 metadata 读请求）
-    """
     return {}
 
 def get_or_create_ws(name: str, rows=5000, cols=50):
     cache = ws_cache()
     if name in cache:
         return cache[name]
-
     sh = gsheet()
 
     def _get():
@@ -151,24 +184,17 @@ def get_or_create_ws(name: str, rows=5000, cols=50):
     return ws
 
 def ensure_headers(tab: str, headers: List[str]):
-    """
-    兼容升级：如果表头缺少新列（比如 Status），自动补到末尾。
-    如果完全不一致（顺序差异/旧字段），会提示 warning，但仍尽量补列，避免程序直接崩。
-    """
     ws = get_or_create_ws(tab)
-
     first = _retry_gspread(lambda: ws.row_values(1))
     if not first or all(str(x).strip() == "" for x in first):
         _retry_gspread(lambda: ws.update("A1", [headers]))
         return
 
-    # 缺哪些列就补到末尾
     missing = [h for h in headers if h not in first]
     if missing:
         new_header = first + missing
         _retry_gspread(lambda: ws.update("A1", [new_header]))
 
-    # 如果顺序/内容不一致，提示
     now_header = _retry_gspread(lambda: ws.row_values(1))
     if now_header[:len(headers)] != headers:
         st.warning(f"⚠️ '{tab}' 表头与预期不完全一致（已尽量自动补列）。如需严格对齐，建议你手动对齐表头顺序。")
@@ -184,8 +210,7 @@ def append_row(tab: str, headers: List[str], row: dict):
     ensure_headers(tab, headers)
     header_now = _retry_gspread(lambda: ws.row_values(1))
     _retry_gspread(lambda: ws.append_row([row.get(h, "") for h in header_now]))
-
-    invalidate_cache()  # ✅ 关键：写完立刻让读缓存失效
+    invalidate_cache()
 
 def kv_get(key: str) -> Optional[str]:
     df = load_df(TAB_CFG, ver("v_cfg"))
@@ -208,14 +233,12 @@ def kv_set(key: str, value: str):
     _retry_gspread(lambda: ws.append_row([key, value]))
     bump_ver("v_cfg")
 
+
 # =========================
 # Sheet helpers for edit/delete
 # =========================
 @st.cache_data(ttl=120)
 def load_df_with_row(tab: str, _v: int = 0) -> pd.DataFrame:
-    """
-    读取 sheet 并带真实行号（_row），用于 update/delete
-    """
     ws = get_or_create_ws(tab)
     vals = _retry_gspread(ws.get_all_values)
     if not vals or len(vals) < 2:
@@ -223,13 +246,13 @@ def load_df_with_row(tab: str, _v: int = 0) -> pd.DataFrame:
     headers = vals[0]
     data = vals[1:]
     df = pd.DataFrame(data, columns=headers)
-    df["_row"] = list(range(2, 2 + len(data)))  # 第1行是表头
+    df["_row"] = list(range(2, 2 + len(data)))
     return df
 
 def ws_col_index(ws, col_name: str) -> Optional[int]:
     headers = _retry_gspread(lambda: ws.row_values(1))
     try:
-        return headers.index(col_name) + 1  # 1-based
+        return headers.index(col_name) + 1
     except ValueError:
         return None
 
@@ -239,12 +262,12 @@ def update_cell_by_row(tab: str, row_num: int, col_name: str, value: str):
     if not ci:
         raise ValueError(f"Column not found: {col_name}")
     _retry_gspread(lambda: ws.update_cell(row_num, ci, value))
-    invalidate_cache()  # ✅
+    invalidate_cache()
 
 def delete_row_by_rownum(tab: str, row_num: int):
     ws = get_or_create_ws(tab)
     _retry_gspread(lambda: ws.delete_rows(row_num))
-    invalidate_cache()  # ✅
+    invalidate_cache()
 
 def replace_value_in_column(tab: str, col_name: str, old: str, new: str) -> int:
     ws = get_or_create_ws(tab)
@@ -268,67 +291,183 @@ def replace_value_in_column(tab: str, col_name: str, old: str, new: str) -> int:
 
     cells = [gspread.cell.Cell(row=r, col=c, value=new) for (r, c) in to_update]
     _retry_gspread(lambda: ws.update_cells(cells))
-    invalidate_cache()  # ✅
+    invalidate_cache()
     return len(to_update)
 
+
 # =========================
-# Drive folder
+# Graph / SharePoint helpers
 # =========================
-def find_folder_id(name: str) -> Optional[str]:
-    res = drive().files().list(
-        q=f"name='{name}' and mimeType='application/vnd.google-apps.folder' and trashed=false",
-        fields="files(id,name)",
-        supportsAllDrives=True,
-        includeItemsFromAllDrives=True,
-    ).execute()
+@st.cache_resource
+def _graph_token() -> str:
+    """
+    Client Credentials: 获取 Graph access token
+    """
+    url = f"https://login.microsoftonline.com/{MS_TENANT_ID}/oauth2/v2.0/token"
+    data = {
+        "client_id": MS_CLIENT_ID,
+        "client_secret": MS_CLIENT_SECRET,
+        "grant_type": "client_credentials",
+        "scope": "https://graph.microsoft.com/.default",
+    }
 
-    files = res.get("files", [])
-    return files[0]["id"] if files else None
+    def _do():
+        return requests.post(url, data=data, timeout=30)
 
-def create_folder(name: str) -> str:
-    folder = drive().files().create(
-        body={"name": name, "mimeType": "application/vnd.google-apps.folder"},
-        fields="id"
-    ).execute()
-    return folder["id"]
+    r = _retry_http(_do)
+    if r.status_code != 200:
+        raise RuntimeError(f"Graph token failed: {r.status_code} {r.text}")
+    return r.json()["access_token"]
 
-def get_or_create_folder() -> str:
-    # 1) 优先用已配置的 folder_id（强烈推荐）
-    fid = kv_get("GDRIVE_FOLDER_ID")
-    if fid:
-        return fid.strip()
+def _graph_headers() -> Dict[str, str]:
+    return {"Authorization": f"Bearer {_graph_token()}"}
 
-    # 2) 其次尝试按名字查（前提：你已经把该文件夹共享给 Service Account）
-    fid2 = find_folder_id(DEFAULT_FOLDER_NAME)
-    if fid2:
-        kv_set("GDRIVE_FOLDER_ID", fid2)
-        return fid2
+@st.cache_resource
+def sp_site_id() -> str:
+    """
+    优先用你提供的 SP_SITE_ID（最稳）。
+    若未来你想自动发现 site_id，可扩展用 hostname/sitePath。
+    """
+    v = (kv_get("SP_SITE_ID") or SP_SITE_ID or "").strip()
+    if not v:
+        raise RuntimeError("缺少 SP_SITE_ID。请在 secrets.toml 或 app_config 里设置 SP_SITE_ID。")
+    return v
 
-    # 3) ❌ 不再自动创建（Service Account 没有 quota，会 403）
-    raise RuntimeError(
-        "未找到可用的图片文件夹。请在 Google Drive 创建文件夹后，把该文件夹共享给 Service Account（编辑者），"
-        "然后把文件夹ID写入 app_config 表 Key=GDRIVE_FOLDER_ID。"
-    )
+@st.cache_resource
+def sp_drive_id_auto() -> str:
+    """
+    ✅ 自动发现 drive_id（Shared Documents / Documents）
+    """
+    sid = sp_site_id()
+    url = f"https://graph.microsoft.com/v1.0/sites/{sid}/drives"
 
-def upload_image(file, folder_id: str):
-    content = file.getvalue()
-    fh = io.BytesIO(content)
-    media = MediaIoBaseUpload(fh, mimetype=file.type, resumable=False)
+    def _do():
+        return requests.get(url, headers=_graph_headers(), timeout=30)
 
-    created = drive().files().create(
-        body={"name": file.name, "parents": [folder_id]},
-        media_body=media,
-        fields="id, webViewLink",
-        supportsAllDrives=True,
-    ).execute()
+    r = _retry_http(_do)
+    if r.status_code != 200:
+        raise RuntimeError(f"List drives failed: {r.status_code} {r.text}")
 
-    drive().permissions().create(
-        fileId=created["id"],
-        body={"type": "anyone", "role": "reader"},
-        supportsAllDrives=True,
-    ).execute()
+    drives = r.json().get("value", [])
 
-    return created.get("webViewLink") or f"https://drive.google.com/file/d/{created['id']}/view"
+    # 1) 优先：webUrl 含 Shared Documents
+    for d in drives:
+        web = str(d.get("webUrl", "") or "")
+        if "Shared%20Documents" in web or "Shared Documents" in web:
+            return d["id"]
+
+    # 2) 次选：name 是 Documents / Shared Documents
+    for d in drives:
+        nm = str(d.get("name", "") or "").lower()
+        if nm in ("documents", "shared documents"):
+            return d["id"]
+
+    # 3) 最后：第一个
+    if drives:
+        return drives[0]["id"]
+
+    raise RuntimeError("未找到可用的 drive（文档库）。请检查 Graph 权限。")
+
+def _sp_item_by_path(drive_id: str, path: str) -> Optional[dict]:
+    """
+    通过路径获取 item（不存在则 None）
+    """
+    # 注意 path 不能以 / 开头
+    path = path.strip().lstrip("/")
+    url = f"https://graph.microsoft.com/v1.0/drives/{drive_id}/root:/{path}"
+    def _do():
+        return requests.get(url, headers=_graph_headers(), timeout=30)
+    r = _retry_http(_do)
+    if r.status_code == 200:
+        return r.json()
+    if r.status_code == 404:
+        return None
+    raise RuntimeError(f"Get item by path failed: {r.status_code} {r.text}")
+
+def _sp_create_folder(drive_id: str, parent_item_id: str, folder_name: str) -> dict:
+    url = f"https://graph.microsoft.com/v1.0/drives/{drive_id}/items/{parent_item_id}/children"
+    body = {
+        "name": folder_name,
+        "folder": {},
+        "@microsoft.graph.conflictBehavior": "fail"
+    }
+    def _do():
+        return requests.post(url, headers={**_graph_headers(), "Content-Type":"application/json"},
+                             json=body, timeout=30)
+    r = _retry_http(_do)
+    if r.status_code in (200, 201):
+        return r.json()
+    # 如果已存在，Graph 可能返回 409
+    if r.status_code == 409:
+        # 再查一次
+        item = _sp_item_by_path(drive_id, folder_name)
+        if item:
+            return item
+    raise RuntimeError(f"Create folder failed: {r.status_code} {r.text}")
+
+@st.cache_resource
+def sp_ensure_base_folder() -> dict:
+    """
+    确保 SP_BASE_FOLDER 存在（在文档库根目录下）
+    返回 folder item (含 id)
+    """
+    drive_id = sp_drive_id_auto()
+    # 根目录 item id 通过 /root 获取
+    root_url = f"https://graph.microsoft.com/v1.0/drives/{drive_id}/root"
+    def _root():
+        return requests.get(root_url, headers=_graph_headers(), timeout=30)
+    rr = _retry_http(_root)
+    rr.raise_for_status()
+    root = rr.json()
+    root_id = root["id"]
+
+    # 先查是否存在
+    existing = _sp_item_by_path(drive_id, SP_BASE_FOLDER)
+    if existing:
+        return existing
+
+    # 不存在就创建
+    return _sp_create_folder(drive_id, root_id, SP_BASE_FOLDER)
+
+def sp_upload_file_to_base_folder(file) -> str:
+    """
+    上传单个文件到 SharePoint 基础文件夹，返回可访问链接（createLink）
+    """
+    drive_id = sp_drive_id_auto()
+    base_folder_item = sp_ensure_base_folder()
+    base_path = SP_BASE_FOLDER.strip().strip("/")
+
+    # 文件名简单清洗，避免路径问题
+    safe_name = re.sub(r"[\\/:*?\"<>|]+", "_", str(file.name))
+
+    upload_url = f"https://graph.microsoft.com/v1.0/drives/{drive_id}/root:/{base_path}/{safe_name}:/content"
+    data = file.getvalue()
+
+    def _do_put():
+        return requests.put(upload_url, headers=_graph_headers(), data=data, timeout=60)
+
+    r = _retry_http(_do_put)
+    if r.status_code not in (200, 201):
+        raise RuntimeError(f"Upload failed: {r.status_code} {r.text}")
+
+    item = r.json()
+    item_id = item["id"]
+
+    # createLink（公司内可看）
+    link_url = f"https://graph.microsoft.com/v1.0/drives/{drive_id}/items/{item_id}/createLink"
+    body = {"type": "view", "scope": SP_LINK_SCOPE}
+
+    def _do_link():
+        return requests.post(link_url,
+                             headers={**_graph_headers(), "Content-Type":"application/json"},
+                             json=body, timeout=30)
+    lr = _retry_http(_do_link)
+    if lr.status_code not in (200, 201):
+        # 如果 createLink 被策略限制，就回退 webUrl
+        return item.get("webUrl", "")
+
+    link = lr.json().get("link", {}).get("webUrl", "")
+    return link or item.get("webUrl", "")
 
 
 # =========================
@@ -360,6 +499,7 @@ def _parse_date_safe(s: str) -> Optional[date]:
     except Exception:
         return None
 
+
 # =========================
 # Bootstrap tabs & defaults
 # =========================
@@ -389,30 +529,34 @@ def bootstrap():
             _retry_gspread(lambda x=x: ws.append_row([x]))
         bump_ver("v_sev")
 
-    _ = get_or_create_folder()
+    # ✅ SharePoint base folder ensure（触发一次检查/创建）
+    _ = sp_ensure_base_folder()
+
 
 # =========================
 # UI Pages
 # =========================
 def page_config():
     st.set_page_config(page_title="产品问题跟踪", layout="wide")
-    st.title("🧩 产品问题跟踪（全新系统）")
-    st.caption("Google Sheet 存数据，Google Drive 存图片；IssueID 自动生成：ISS-YYYYMMDD-0001")
+    st.title("🧩 产品问题跟踪（SharePoint 图片版）")
+    st.caption("Google Sheet 存数据，SharePoint 存图片；IssueID 自动生成：ISS-YYYYMMDD-0001")
 
 def tab_settings():
     st.subheader("⚙️ 配置")
 
-    # 🔄 手动强制刷新（解决 Sheet 已删但系统还显示的问题）
     if st.button("🔄 强制刷新（重新从 Sheet 读取）", key="btn_force_refresh"):
         invalidate_cache()
         st.toast("缓存已清空，已重新从 Google Sheet 读取")
         st.rerun()
 
-    folder_id = get_or_create_folder()
-    st.info(f"✅ 图片默认文件夹：{DEFAULT_FOLDER_NAME} （folder_id={folder_id}）")
+    # 展示 SharePoint 目标位置
+    try:
+        did = sp_drive_id_auto()
+        st.info(f"✅ SharePoint 图片位置：Drive(自动发现)={did[:10]}...  Folder={SP_BASE_FOLDER}")
+    except Exception as e:
+        st.error(f"SharePoint 配置/权限异常：{e}")
 
     sync_update = st.checkbox("改名时同步更新关联数据（推荐）", value=True)
-
 
     def _flush(*keys):
         for k in keys:
@@ -446,14 +590,11 @@ def tab_settings():
             with b1:
                 if st.button("✅ 保存修改", key="btn_cat_save"):
                     if not new_name.strip():
-                        st.error("新名称不能为空")
-                        st.stop()
+                        st.error("新名称不能为空"); st.stop()
                     update_cell_by_row(TAB_CATS, row_num, "Category", new_name.strip())
-
                     if sync_update and new_name.strip() != pick:
                         replace_value_in_column(TAB_MODELS, "Category", pick, new_name.strip())
                         replace_value_in_column(TAB_ISSUES, "ProductCategory", pick, new_name.strip())
-
                     st.success("已更新")
                     _flush("v_cats", "v_models", "v_issues")
 
@@ -488,13 +629,10 @@ def tab_settings():
             with b1:
                 if st.button("✅ 保存修改", key="btn_type_save"):
                     if not new_name.strip():
-                        st.error("新名称不能为空")
-                        st.stop()
+                        st.error("新名称不能为空"); st.stop()
                     update_cell_by_row(TAB_TYPES, row_num, "Type", new_name.strip())
-
                     if sync_update and new_name.strip() != pick:
                         replace_value_in_column(TAB_ISSUES, "IssueType", pick, new_name.strip())
-
                     st.success("已更新")
                     _flush("v_types", "v_issues")
 
@@ -531,13 +669,10 @@ def tab_settings():
         with b1:
             if st.button("✅ 保存修改", key="btn_sev_save"):
                 if not new_name.strip():
-                    st.error("新名称不能为空")
-                    st.stop()
+                    st.error("新名称不能为空"); st.stop()
                 update_cell_by_row(TAB_SEV, row_num, "Severity", new_name.strip())
-
                 if sync_update and new_name.strip() != pick:
                     replace_value_in_column(TAB_ISSUES, "Severity", pick, new_name.strip())
-
                 st.success("已更新")
                 bump_ver("v_sev"); bump_ver("v_issues")
                 st.rerun()
@@ -597,11 +732,9 @@ def tab_settings():
         with b1:
             if st.button("✅ 保存修改", key="btn_model_save"):
                 if not new_model_name.strip():
-                    st.error("型号名称不能为空")
-                    st.stop()
+                    st.error("型号名称不能为空"); st.stop()
                 if not new_model_cat.strip():
-                    st.error("所属分类不能为空")
-                    st.stop()
+                    st.error("所属分类不能为空"); st.stop()
 
                 update_cell_by_row(TAB_MODELS, row_num, "Model", new_model_name.strip())
                 update_cell_by_row(TAB_MODELS, row_num, "Category", new_model_cat.strip())
@@ -622,6 +755,7 @@ def tab_settings():
                 st.success("已删除")
                 bump_ver("v_models"); bump_ver("v_issues")
                 st.rerun()
+
 
 def tab_new():
     st.subheader("➕ 新增问题")
@@ -675,22 +809,18 @@ def tab_new():
 
     if st.button("✅ 保存", key="btn_save_issue"):
         if not model.strip():
-            st.error("请先选择型号（先到【配置】里添加型号）")
-            st.stop()
+            st.error("请先选择型号（先到【配置】里添加型号）"); st.stop()
         if not category.strip():
-            st.error("请先选择产品分类（或先给该型号绑定分类）")
-            st.stop()
+            st.error("请先选择产品分类（或先给该型号绑定分类）"); st.stop()
         if not issue_name.strip():
-            st.error("请填写问题名称")
-            st.stop()
+            st.error("请填写问题名称"); st.stop()
 
-        folder_id = get_or_create_folder()
         links = []
         if imgs:
-            with st.spinner("上传图片到 Google Drive..."):
+            with st.spinner("上传图片到 SharePoint..."):
                 for f in imgs:
                     try:
-                        links.append(upload_image(f, folder_id))
+                        links.append(sp_upload_file_to_base_folder(f))
                     except Exception as e:
                         st.warning(f"图片 {f.name} 上传失败：{e}")
 
@@ -708,13 +838,14 @@ def tab_new():
             "Status": status,
             "CreatedAt": str(created),
             "ImplementDate": str(implement) if implement else "",
-            "ImageLinks": ";".join(links),
+            "ImageLinks": ";".join([x for x in links if x]),
             "UpdatedAt": now_ts,
         }
         append_row(TAB_ISSUES, ISSUE_HEADERS, row)
         bump_ver("v_issues")
         st.success(f"✅ 已保存：{issue_id}")
         st.rerun()
+
 
 def tab_list():
     st.subheader("📋 查询 / 列表")
@@ -804,6 +935,7 @@ def tab_list():
                 for lk in [x.strip() for x in links.split(";") if x.strip()]:
                     st.markdown(f"- {lk}")
 
+
 def tab_edit():
     st.subheader("✏️ 编辑问题（含：未完成 / 待实施 / 已完成）")
 
@@ -825,14 +957,12 @@ def tab_edit():
         st.info("暂无有效 IssueID。")
         return
 
-    # ✅ 给选择 IssueID 的控件也加 key
     pick = st.selectbox("选择要编辑的 IssueID", ids, key="edit_pick_issueid")
 
     row_sel = df[df["IssueID"].astype(str) == str(pick)].iloc[0]
     row_num = int(row_sel["_row"])
     r = row_sel.to_dict()
 
-    # 选项数据
     df_models = load_df(TAB_MODELS, ver("v_models"))
     df_cats = load_df(TAB_CATS, ver("v_cats"))
     df_types = load_df(TAB_TYPES, ver("v_types"))
@@ -843,20 +973,17 @@ def tab_edit():
     type_list = sorted(df_types["Type"].astype(str).tolist()) if (not df_types.empty and "Type" in df_types.columns) else []
     sev_list = sorted(df_sev["Severity"].astype(str).tolist()) if (not df_sev.empty and "Severity" in df_sev.columns) else []
 
-    # 当前值
     cur_model = str(r.get("Model", "")).strip()
     cur_cat = str(r.get("ProductCategory", "")).strip()
     cur_type = str(r.get("IssueType", "")).strip()
     cur_sev = str(r.get("Severity", "")).strip()
     cur_status = str(r.get("Status", "")).strip() or "未完成"
 
-    # 日期
     cur_created = _parse_date_safe(r.get("CreatedAt", "")) or date.today()
-    cur_impl = _parse_date_safe(r.get("ImplementDate", ""))  # 可空
+    cur_impl = _parse_date_safe(r.get("ImplementDate", ""))
 
     st.caption(f"行号（Sheet）：{row_num}")
 
-    # ✅ 用 IssueID 做前缀，确保每次编辑不同单子时 key 也不同（避免缓存/冲突）
     kpre = f"edit_{pick}_"
 
     c1, c2, c3 = st.columns([1.2, 1.0, 1.0])
@@ -925,14 +1052,11 @@ def tab_edit():
     with c_save:
         if st.button("✅ 保存修改", key=kpre + "btn_update"):
             if not model.strip():
-                st.error("请先选择型号")
-                st.stop()
+                st.error("请先选择型号"); st.stop()
             if not category.strip():
-                st.error("请先选择产品分类")
-                st.stop()
+                st.error("请先选择产品分类"); st.stop()
             if not issue_name.strip():
-                st.error("问题名称不能为空")
-                st.stop()
+                st.error("问题名称不能为空"); st.stop()
 
             now_ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
@@ -958,33 +1082,29 @@ def tab_edit():
         confirm = st.checkbox("我确认要删除该问题", value=False, key=kpre + "del_confirm")
         if st.button("🗑️ 删除该问题", key=kpre + "btn_delete"):
             if not confirm:
-                st.warning("请先勾选确认")
-                st.stop()
+                st.warning("请先勾选确认"); st.stop()
             delete_row_by_rownum(TAB_ISSUES, row_num)
             bump_ver("v_issues")
             st.success("已删除")
             st.rerun()
 
+
 def main():
     page_config()
 
-    # ✅ toast（跨 rerun 仍能显示）
     msg = st.session_state.pop("toast", None)
     if msg:
         st.toast(msg)
 
-    # ✅ bootstrap 只在本次会话第一次运行
     if "bootstrapped" not in st.session_state:
         bootstrap()
         st.session_state["bootstrapped"] = True
 
-    # ✅ 读取当前 tab（从 URL query）
     qp = st.query_params
     cur = qp.get("tab", "list")
     if cur not in ["list", "new", "edit", "settings"]:
         cur = "list"
 
-    # ✅ 导航（替代 st.tabs，避免 rerun 回到第一个 tab）
     tab = st.radio(
         "导航",
         ["list","new","edit","settings"],
@@ -1000,7 +1120,6 @@ def main():
     )
     st.query_params["tab"] = tab
 
-    # ✅ 渲染页面
     if tab == "list":
         tab_list()
     elif tab == "new":
