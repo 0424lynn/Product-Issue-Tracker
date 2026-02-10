@@ -45,7 +45,7 @@ TAB_SEV = "severities"
 TAB_MODELS = "models"
 TAB_CFG = "app_config"
 
-DEFAULT_FOLDER_NAME = "ProductIssueImages"
+DEFAULT_FOLDER_NAME = "1dWCNP0ReJq_20ZWr0GUDzbcgO68ek_9k"
 
 STATUS_OPTIONS = ["未完成", "待实施", "已完成"]
 
@@ -301,23 +301,41 @@ def get_or_create_folder() -> str:
     kv_set("GDRIVE_FOLDER_ID", fid3)
     return fid3
 
-def upload_image(file, folder_id: str) -> str:
+def upload_image(file):
+    folder_id = get_or_create_folder()  # ✅ 关键：确保是有权限的 folder
+
     content = file.getvalue()
     fh = io.BytesIO(content)
-    media = MediaIoBaseUpload(fh, mimetype=file.type, resumable=False)
+
+    media = MediaIoBaseUpload(
+        fh,
+        mimetype=file.type,
+        resumable=False
+    )
 
     created = drive().files().create(
-        body={"name": file.name, "parents": [folder_id]},
+        body={
+            "name": file.name,
+            "parents": [folder_id],  # ✅ 不再用 FIXED_FOLDER_ID
+        },
         media_body=media,
         fields="id, webViewLink"
     ).execute()
 
+    # 设置为任何人可查看（只读）
     drive().permissions().create(
         fileId=created["id"],
-        body={"type": "anyone", "role": "reader"},
+        body={
+            "type": "anyone",
+            "role": "reader",
+        },
     ).execute()
 
-    return created.get("webViewLink") or f"https://drive.google.com/file/d/{created['id']}/view"
+    return (
+        created.get("webViewLink")
+        or f"https://drive.google.com/file/d/{created['id']}/view"
+    )
+
 
 # =========================
 # IssueID
