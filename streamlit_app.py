@@ -277,8 +277,11 @@ def replace_value_in_column(tab: str, col_name: str, old: str, new: str) -> int:
 def find_folder_id(name: str) -> Optional[str]:
     res = drive().files().list(
         q=f"name='{name}' and mimeType='application/vnd.google-apps.folder' and trashed=false",
-        fields="files(id,name)"
+        fields="files(id,name)",
+        supportsAllDrives=True,
+        includeItemsFromAllDrives=True,
     ).execute()
+
     files = res.get("files", [])
     return files[0]["id"] if files else None
 
@@ -290,16 +293,22 @@ def create_folder(name: str) -> str:
     return folder["id"]
 
 def get_or_create_folder() -> str:
+    # 1) 优先用已配置的 folder_id（强烈推荐）
     fid = kv_get("GDRIVE_FOLDER_ID")
     if fid:
-        return fid
+        return fid.strip()
+
+    # 2) 其次尝试按名字查（前提：你已经把该文件夹共享给 Service Account）
     fid2 = find_folder_id(DEFAULT_FOLDER_NAME)
     if fid2:
         kv_set("GDRIVE_FOLDER_ID", fid2)
         return fid2
-    fid3 = create_folder(DEFAULT_FOLDER_NAME)
-    kv_set("GDRIVE_FOLDER_ID", fid3)
-    return fid3
+
+    # 3) ❌ 不再自动创建（Service Account 没有 quota，会 403）
+    raise RuntimeError(
+        "未找到可用的图片文件夹。请在 Google Drive 创建文件夹后，把该文件夹共享给 Service Account（编辑者），"
+        "然后把文件夹ID写入 app_config 表 Key=GDRIVE_FOLDER_ID。"
+    )
 
 def upload_image(file, folder_id: str):
     content = file.getvalue()
@@ -309,12 +318,14 @@ def upload_image(file, folder_id: str):
     created = drive().files().create(
         body={"name": file.name, "parents": [folder_id]},
         media_body=media,
-        fields="id, webViewLink"
+        fields="id, webViewLink",
+        supportsAllDrives=True,
     ).execute()
 
     drive().permissions().create(
         fileId=created["id"],
         body={"type": "anyone", "role": "reader"},
+        supportsAllDrives=True,
     ).execute()
 
     return created.get("webViewLink") or f"https://drive.google.com/file/d/{created['id']}/view"
