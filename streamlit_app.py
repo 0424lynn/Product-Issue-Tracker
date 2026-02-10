@@ -929,8 +929,7 @@ def tab_list():
         "IssueID","ProductCategory","Model","IssueName",
         "Severity","IssueType","Status",
         "CreatedAt","ImplementDate","UpdatedAt",
-        "ImageLink",      # ✅ 新增：可点击
-        "ImageLinks",     # 可选：保留原始多链接文本（想干净就删掉）
+        "ImageLink",      # ✅ 新增：可点击 
     ]
     show_cols = [c for c in show_cols if c in view_show.columns]
 
