@@ -320,6 +320,7 @@ def replace_value_in_column(tab: str, col_name: str, old: str, new: str) -> int:
 
 @st.cache_data(ttl=120)
 def load_updates(_v: int = 0) -> pd.DataFrame:
+    ensure_headers(TAB_UPDATES, UPDATES_HEADERS)
     dfu = load_df(TAB_UPDATES, _v)
     if dfu.empty:
         return dfu
@@ -1063,23 +1064,28 @@ def tab_list():
                 st.markdown("### Image / Attachment Links")
                 for lk in [x.strip() for x in links.split(";") if x.strip()]:
                     st.markdown(f"- [Open]({lk})")
-    # --- Progress History (MUST be inside pick.strip()) ---
+    # --- Progress History (inside pick.strip()) ---
     dfu = load_updates(ver("v_updates"))
-    hist = dfu[dfu["IssueID"].astype(str).str.strip() == pick.strip()].copy()
-    if not hist.empty:
-        hist["UpdateAt_dt"] = pd.to_datetime(hist.get("UpdateAt",""), errors="coerce")
-        hist = hist.sort_values("UpdateAt_dt", ascending=False)
 
-        st.markdown("### Progress History")
-        for _, rr in hist.iterrows():
-            st.markdown(
-                f"- **{rr.get('UpdateAt','')}** | **{rr.get('Status','')}** | {rr.get('Note','')}"
-            )
-            ns = str(rr.get("NextStep","") or "").strip()
-            if ns:
-                st.caption(f"Next: {ns}")
-    else:
+    if dfu.empty or "IssueID" not in dfu.columns:
         st.caption("No progress updates yet.")
+    else:
+        hist = dfu[dfu["IssueID"].astype(str).str.strip() == pick.strip()].copy()
+        if not hist.empty:
+            hist["UpdateAt_dt"] = pd.to_datetime(hist.get("UpdateAt", ""), errors="coerce")
+            hist = hist.sort_values("UpdateAt_dt", ascending=False)
+
+            st.markdown("### Progress History")
+            for _, rr in hist.iterrows():
+                st.markdown(
+                    f"- **{rr.get('UpdateAt','')}** | **{rr.get('Status','')}** | {rr.get('Note','')}"
+                )
+                ns = str(rr.get("NextStep", "") or "").strip()
+                if ns:
+                    st.caption(f"Next: {ns}")
+        else:
+            st.caption("No progress updates yet.")
+
                
     st.markdown("### ⚡ Quick Update (Add Progress Log)")
 
