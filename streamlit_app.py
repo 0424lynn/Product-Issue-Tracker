@@ -1120,29 +1120,49 @@ def tab_list():
     )
 
 
+    # =========================
+    # View + Detail Panel (Dialog)
+    # =========================
     st.markdown("### 🔍 View Single Record (Enter IssueID)")
+
     cA, cB = st.columns([1.4, 1.0])
     with cA:
         pick = st.text_input("IssueID", key="pick_issueid")
     with cB:
         open_detail = st.button("🧾 Open Detail Panel", use_container_width=True)
 
-    dfu = load_updates(ver("v_updates"))  # ✅ 你本来就会用到
-
-    # ✅ 点击按钮，用弹窗打开“更大的详情面板”
+    # ✅ 用 session_state 记住“要打开弹窗”，避免 rerun/后续渲染把效果冲掉
     if open_detail and pick.strip():
+        st.session_state["__open_issue_detail__"] = pick.strip()
+
+    # 只加载一次 updates
+    dfu = load_updates(ver("v_updates"))
+
+    # ✅ 统一在这里弹窗（或 fallback）
+    if st.session_state.get("__open_issue_detail__", "").strip():
+        issue_to_open = st.session_state["__open_issue_detail__"]
+
         try:
-            @st.dialog(f"Issue Detail: {pick.strip()}", width="large")
+            @st.dialog(f"Issue Detail: {issue_to_open}", width="large")
             def _dlg():
-                show_issue_detail_panel(pick.strip(), df, dfu)
+                show_issue_detail_panel(issue_to_open, df, dfu)
+                if st.button("Close", type="secondary"):
+                    st.session_state["__open_issue_detail__"] = ""
+                    st.rerun()
             _dlg()
         except Exception:
-            # 兼容老版本 Streamlit 没有 st.dialog
-            with st.expander("Issue Detail (fallback)", expanded=True):
-                show_issue_detail_panel(pick.strip(), df, dfu)
+            # 旧版本 fallback：用 expander 展开
+            with st.expander(f"Issue Detail (fallback): {issue_to_open}", expanded=True):
+                show_issue_detail_panel(issue_to_open, df, dfu)
+                if st.button("Close Detail", type="secondary"):
+                    st.session_state["__open_issue_detail__"] = ""
+                    st.rerun()
 
+    # =========================
+    # Inline details (optional)
+    # =========================
     if pick.strip():
-        m = df[df["IssueID"].astype(str) == pick.strip()]
+        m = df[df["IssueID"].astype(str).str.strip() == pick.strip()]
         if m.empty:
             st.warning("IssueID not found.")
         else:
@@ -1165,30 +1185,32 @@ def tab_list():
                 st.markdown("### Image / Attachment Links")
                 for lk in [x.strip() for x in links.split(";") if x.strip()]:
                     st.markdown(f"- [Open]({lk})")
-    # --- Progress History (inside pick.strip()) ---
-    dfu = load_updates(ver("v_updates"))
 
-    if dfu.empty or "IssueID" not in dfu.columns:
-        st.caption("No progress updates yet.")
-    else:
-        hist = dfu[dfu["IssueID"].astype(str).str.strip() == pick.strip()].copy()
-        if not hist.empty:
-            hist["UpdateAt_dt"] = pd.to_datetime(hist.get("UpdateAt", ""), errors="coerce")
-            hist = hist.sort_values("UpdateAt_dt", ascending=False)
-
-            st.markdown("### Progress History")
-            for _, rr in hist.iterrows():
-                st.markdown(
-                    f"- **{rr.get('UpdateAt','')}** | **{rr.get('Status','')}** | {rr.get('Note','')}"
-                )
-                ns = str(rr.get("NextStep", "") or "").strip()
-                if ns:
-                    st.caption(f"Next: {ns}")
-        else:
+        # --- Progress History ✅ 必须放进 pick.strip() ---
+        if dfu.empty or "IssueID" not in dfu.columns:
             st.caption("No progress updates yet.")
+        else:
+            hist = dfu[dfu["IssueID"].astype(str).str.strip() == pick.strip()].copy()
+            if not hist.empty:
+                hist["UpdateAt_dt"] = pd.to_datetime(hist.get("UpdateAt", ""), errors="coerce")
+                hist = hist.sort_values("UpdateAt_dt", ascending=False)
 
-               
+                st.markdown("### Progress History")
+                for _, rr in hist.iterrows():
+                    st.markdown(
+                        f"- **{rr.get('UpdateAt','')}** | **{rr.get('Status','')}** | {rr.get('Note','')}"
+                    )
+                    ns = str(rr.get("NextStep", "") or "").strip()
+                    if ns:
+                        st.caption(f"Next: {ns}")
+            else:
+                st.caption("No progress updates yet.")
+
+    # =========================
+    # Quick Update
+    # =========================
     st.markdown("### ⚡ Quick Update (Add Progress Log)")
+
 
     ids = sorted(df["IssueID"].astype(str).dropna().unique().tolist())
     colu1, colu2, colu3 = st.columns([1.2, 1.0, 1.0])
