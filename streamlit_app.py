@@ -1086,17 +1086,6 @@ def show_issue_detail_panel(issue_id: str, df_issues: pd.DataFrame, dfu: pd.Data
                 if ns:
                     st.caption(f"Next: {ns}")
 
-
-    # ✅ 时间线方式（阅读更舒服）
-    with st.expander("Timeline view", expanded=False):
-        for _, rr in hist.iterrows():
-            st.markdown(
-                f"- **{rr.get('UpdateAt','')}** | **{rr.get('Status','')}** | {rr.get('Note','')}"
-            )
-            ns = str(rr.get("NextStep","") or "").strip()
-            if ns:
-                st.caption(f"Next: {ns}")
-
 def tab_list():
     st.subheader("📋 Search / List")
     df = load_df(TAB_ISSUES, ver("v_issues"))
@@ -1235,7 +1224,9 @@ def tab_list():
                 st.warning("Please select a row first.")
             else:
                 st.session_state["__open_issue_detail__"] = iid
+                st.session_state["__open_issue_once__"] = True   # ✅ 只允许打开一次
                 st.rerun()
+
 
     with open_col2:
         sel_show = str(st.session_state.get("__selected_issueid__", "")).strip()
@@ -1245,9 +1236,13 @@ def tab_list():
     # 只加载一次 updates
     dfu = load_updates(ver("v_updates"))
 
-    # ✅ 统一在这里弹窗（或 fallback）
-    if st.session_state.get("__open_issue_detail__", "").strip():
-        issue_to_open = st.session_state["__open_issue_detail__"]
+    issue_to_open = str(st.session_state.get("__open_issue_detail__", "")).strip()
+    open_once = bool(st.session_state.get("__open_issue_once__", False))
+
+    # ✅ 只有 open_once=True 才弹窗；弹完立刻复位，避免任何 rerun 再弹
+    if issue_to_open and open_once:
+        # 先复位：保证后续任何 rerun 都不会再弹
+        st.session_state["__open_issue_once__"] = False
 
         try:
             @st.dialog(f"Issue Detail: {issue_to_open}", width="large")
@@ -1258,12 +1253,12 @@ def tab_list():
                     st.rerun()
             _dlg()
         except Exception:
-            # 旧版本 fallback：用 expander 展开
             with st.expander(f"Issue Detail (fallback): {issue_to_open}", expanded=True):
                 show_issue_detail_panel(issue_to_open, df, dfu)
                 if st.button("Close Detail", type="secondary"):
                     st.session_state["__open_issue_detail__"] = ""
                     st.rerun()
+
 
     # =========================
     # Quick Update
