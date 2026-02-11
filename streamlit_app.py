@@ -1051,40 +1051,23 @@ def show_issue_detail_panel(issue_id: str, df_issues: pd.DataFrame, dfu: pd.Data
             sel_idx = int(sel_u[0])
             st.session_state["__selected_update_row__"] = int(show_df.iloc[sel_idx]["_row"])
 
-        d1, d2, d3 = st.columns([1.2, 1.2, 2.0])
-        with d1:
-            if st.button("🗑️ Delete Selected Update", key=f"btn_del_upd_{issue_id}"):
-                row_to_del = st.session_state.get("__selected_update_row__", None)
-                if not row_to_del:
-                    st.warning("Please select an update row first.")
-                else:
-                    st.session_state[f"__confirm_del_upd_{issue_id}"] = True
-                    st.rerun()
+    d1, d2 = st.columns([1.2, 2.8])
 
-        with d2:
-            if st.session_state.get(f"__confirm_del_upd_{issue_id}", False):
-                ok = st.checkbox("Confirm delete this update", key=f"chk_del_upd_{issue_id}")
-                if st.button("✅ Confirm Delete Update", key=f"btn_confirm_del_upd_{issue_id}"):
-                    if not ok:
-                        st.warning("Please check confirmation box first.")
-                    else:
-                        delete_row_by_rownum(TAB_UPDATES, int(st.session_state["__selected_update_row__"]))
-                        bump_ver("v_updates")
-                        st.session_state["__selected_update_row__"] = None
-                        st.session_state[f"__confirm_del_upd_{issue_id}"] = False
-                        st.success("Deleted update.")
-                        st.rerun()
+    with d1:
+        if st.button("🗑️ Delete Selected Update", key=f"btn_del_upd_{issue_id}"):
+            row_to_del = st.session_state.get("__selected_update_row__", None)
+            if not row_to_del:
+                st.warning("Please select an update row first.")
+            else:
+                delete_row_by_rownum(TAB_UPDATES, int(row_to_del))
+                bump_ver("v_updates")
+                st.session_state["__selected_update_row__"] = None
+                st.success("✅ Deleted update.")
+                st.rerun()
 
-        with d3:
-            st.caption("Tip: Select a row above, then delete it.")
+    with d2:
+        st.caption("Tip: Select a row above, then delete it.")
 
-        with st.expander("Timeline view", expanded=False):
-            # 用 hist（dfu）展示阅读友好视图
-            for _, rr in hist.iterrows():
-                st.markdown(f"- **{rr.get('UpdateAt','')}** | **{rr.get('Status','')}** | {rr.get('Note','')}")
-                ns = str(rr.get("NextStep","") or "").strip()
-                if ns:
-                    st.caption(f"Next: {ns}")
 
 def tab_list():
     st.subheader("📋 Search / List")
