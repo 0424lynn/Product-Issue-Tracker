@@ -27,6 +27,7 @@ from gspread.exceptions import APIError
 from google.oauth2.service_account import Credentials
 
 import requests
+import html
 
 # =========================
 # Settings
@@ -131,6 +132,13 @@ def _first_url(s: str) -> str:
 def _preview_text(s: str, n: int = 80) -> str:
     t = str(s or "").strip().replace("\n", " ")
     return (t[:n] + "…") if len(t) > n else t
+
+def render_multiline(text: str):
+    t = str(text or "")
+    st.markdown(
+        f"<div style='white-space: pre-wrap; line-height: 1.5;'>{html.escape(t)}</div>",
+        unsafe_allow_html=True,
+    )
 
 def _retry_http(fn, *, tries=6, base_sleep=0.8):
     """
@@ -995,13 +1003,13 @@ def show_issue_detail_panel(issue_id: str, df_issues: pd.DataFrame, dfu: pd.Data
         st.write(f"**Updated At**: {r.get('UpdatedAt','')}")
 
     st.markdown("### Description")
-    st.write(r.get("Description", ""))
+    render_multiline(r.get("Description", ""))
 
     st.markdown("### Temporary Fix")
-    st.write(r.get("TempFix", ""))
+    render_multiline(r.get("TempFix", ""))
 
     st.markdown("### Improvement Plan")
-    st.write(r.get("ImprovePlan", ""))
+    render_multiline(r.get("ImprovePlan", ""))
 
     # attachments
     links = str(r.get("ImageLinks", "") or "").strip()
