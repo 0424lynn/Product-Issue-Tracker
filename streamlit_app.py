@@ -1089,35 +1089,66 @@ def tab_list():
 
     show_cols = [c for c in show_cols if c in view_show.columns]
 
-    st.dataframe(
-        view_show[show_cols],
-        use_container_width=True,
-        hide_index=True,
-        height=520,  # ✅ 让表格区域更大
-        column_config={
-            "DescriptionPreview": st.column_config.TextColumn(
-                "Description (Preview)",
-                help="Short preview of Description. Use 'View Single Record' to see full text.",
-            ),
-            "LastUpdateAt": st.column_config.TextColumn(
-                "Last Update",
-                help="Latest progress update timestamp.",
-            ),
-            "LastNotePreview": st.column_config.TextColumn(
-                "Latest Note",
-                help="Latest progress note (preview).",
-            ),
-            "LastNextStepPreview": st.column_config.TextColumn(
-                "Next Step",
-                help="Latest next step (preview).",
-            ),
-            "ImageLink": st.column_config.LinkColumn(
-                "Image Link",
-                display_text="Open",
-                help="Click to open SharePoint image/attachment (first link from ImageLinks).",
-            ),
-        },
-    )
+    # ✅ 让 selection 行号和展示一致
+    view_show = view_show.reset_index(drop=True)
+
+    # ✅ 优先使用“点击行选择”的 DataFrame（新版本 Streamlit 支持）
+    try:
+        evt = st.dataframe(
+            view_show[show_cols],
+            use_container_width=True,
+            hide_index=True,
+            height=520,
+            on_select="rerun",
+            selection_mode="single-row",
+            key="issues_table",
+            column_config={
+                "DescriptionPreview": st.column_config.TextColumn(
+                    "Description (Preview)",
+                    help="Short preview of Description. Use detail panel to see full text.",
+                ),
+                "LastUpdateAt": st.column_config.TextColumn(
+                    "Last Update",
+                    help="Latest progress update timestamp.",
+                ),
+                "LastNotePreview": st.column_config.TextColumn(
+                    "Latest Note",
+                    help="Latest progress note (preview).",
+                ),
+                "LastNextStepPreview": st.column_config.TextColumn(
+                    "Next Step",
+                    help="Latest next step (preview).",
+                ),
+                "ImageLink": st.column_config.LinkColumn(
+                    "Image Link",
+                    display_text="Open",
+                    help="Click to open SharePoint image/attachment (first link from ImageLinks).",
+                ),
+            },
+        )
+
+        # ✅ 用户点了某行：直接拿 IssueID → 打开弹窗
+        sel_rows = (evt.selection.rows or [])
+        if sel_rows:
+            iid = str(view_show.iloc[int(sel_rows[0])]["IssueID"]).strip()
+            if iid:
+                st.session_state["__open_issue_detail__"] = iid
+
+    except TypeError:
+        # 旧版 Streamlit 不支持 selection_mode/on_select：退回普通表格
+        st.dataframe(
+            view_show[show_cols],
+            use_container_width=True,
+            hide_index=True,
+            height=520,
+            column_config={
+                "DescriptionPreview": st.column_config.TextColumn("Description (Preview)"),
+                "LastUpdateAt": st.column_config.TextColumn("Last Update"),
+                "LastNotePreview": st.column_config.TextColumn("Latest Note"),
+                "LastNextStepPreview": st.column_config.TextColumn("Next Step"),
+                "ImageLink": st.column_config.LinkColumn("Image Link", display_text="Open"),
+            },
+        )
 
 
     # =========================
