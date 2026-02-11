@@ -911,6 +911,88 @@ def tab_new():
         st.success(f"✅ Saved: {issue_id}")
         st.rerun()
 
+def _get_issue_row(df: pd.DataFrame, issue_id: str) -> Optional[dict]:
+    if df is None or df.empty or "IssueID" not in df.columns:
+        return None
+    m = df[df["IssueID"].astype(str).str.strip() == str(issue_id).strip()]
+    if m.empty:
+        return None
+    return m.iloc[0].to_dict()
+
+def _get_issue_updates(dfu: pd.DataFrame, issue_id: str) -> pd.DataFrame:
+    if dfu is None or dfu.empty or "IssueID" not in dfu.columns:
+        return pd.DataFrame()
+    hist = dfu[dfu["IssueID"].astype(str).str.strip() == str(issue_id).strip()].copy()
+    if hist.empty:
+        return hist
+    hist["UpdateAt_dt"] = pd.to_datetime(hist.get("UpdateAt", ""), errors="coerce")
+    hist = hist.sort_values("UpdateAt_dt", ascending=False)
+    return hist
+
+def show_issue_detail_panel(issue_id: str, df_issues: pd.DataFrame, dfu: pd.DataFrame):
+    r = _get_issue_row(df_issues, issue_id)
+    if not r:
+        st.warning("IssueID not found.")
+        return
+
+    st.markdown(f"## {r.get('IssueID','')}: {r.get('IssueName','')}")
+    c1, c2, c3 = st.columns([1.1, 1.1, 1.0])
+    with c1:
+        st.write(f"**Category**: {r.get('ProductCategory','')}")
+        st.write(f"**Model**: {r.get('Model','')}")
+        st.write(f"**Severity**: {r.get('Severity','')}")
+    with c2:
+        st.write(f"**Issue Type**: {r.get('IssueType','')}")
+        st.write(f"**Status**: {r.get('Status','')}")
+        st.write(f"**Created**: {r.get('CreatedAt','')}")
+    with c3:
+        st.write(f"**Implement Date**: {r.get('ImplementDate','')}")
+        st.write(f"**Updated At**: {r.get('UpdatedAt','')}")
+
+    st.markdown("### Description")
+    st.write(r.get("Description", ""))
+
+    st.markdown("### Temporary Fix")
+    st.write(r.get("TempFix", ""))
+
+    st.markdown("### Improvement Plan")
+    st.write(r.get("ImprovePlan", ""))
+
+    # attachments
+    links = str(r.get("ImageLinks", "") or "").strip()
+    st.markdown("### Image / Attachment Links")
+    if links:
+        for lk in [x.strip() for x in links.split(";") if x.strip()]:
+            st.markdown(f"- [Open]({lk})")
+    else:
+        st.caption("None")
+
+    # progress history
+    st.markdown("---")
+    st.markdown("### Progress History (All Updates)")
+    hist = _get_issue_updates(dfu, issue_id)
+    if hist.empty:
+        st.caption("No progress updates yet.")
+        return
+
+    # ✅ 表格方式（可滚动、可看全）
+    show_hist_cols = [c for c in ["UpdateAt","Status","Note","NextStep","UpdatedBy"] if c in hist.columns]
+    st.dataframe(
+        hist[show_hist_cols],
+        use_container_width=True,
+        hide_index=True,
+        height=360,
+    )
+
+    # ✅ 时间线方式（阅读更舒服）
+    with st.expander("Timeline view", expanded=False):
+        for _, rr in hist.iterrows():
+            st.markdown(
+                f"- **{rr.get('UpdateAt','')}** | **{rr.get('Status','')}** | {rr.get('Note','')}"
+            )
+            ns = str(rr.get("NextStep","") or "").strip()
+            if ns:
+                st.caption(f"Next: {ns}")
 
 def tab_list():
     st.subheader("📋 Search / List")
@@ -1011,6 +1093,7 @@ def tab_list():
         view_show[show_cols],
         use_container_width=True,
         hide_index=True,
+        height=520,  # ✅ 让表格区域更大
         column_config={
             "DescriptionPreview": st.column_config.TextColumn(
                 "Description (Preview)",
@@ -1038,7 +1121,25 @@ def tab_list():
 
 
     st.markdown("### 🔍 View Single Record (Enter IssueID)")
-    pick = st.text_input("IssueID", key="pick_issueid")
+    cA, cB = st.columns([1.4, 1.0])
+    with cA:
+        pick = st.text_input("IssueID", key="pick_issueid")
+    with cB:
+        open_detail = st.button("🧾 Open Detail Panel", use_container_width=True)
+
+    dfu = load_updates(ver("v_updates"))  # ✅ 你本来就会用到
+
+    # ✅ 点击按钮，用弹窗打开“更大的详情面板”
+    if open_detail and pick.strip():
+        try:
+            @st.dialog(f"Issue Detail: {pick.strip()}", width="large")
+            def _dlg():
+                show_issue_detail_panel(pick.strip(), df, dfu)
+            _dlg()
+        except Exception:
+            # 兼容老版本 Streamlit 没有 st.dialog
+            with st.expander("Issue Detail (fallback)", expanded=True):
+                show_issue_detail_panel(pick.strip(), df, dfu)
 
     if pick.strip():
         m = df[df["IssueID"].astype(str) == pick.strip()]
