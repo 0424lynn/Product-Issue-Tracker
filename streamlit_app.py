@@ -1091,21 +1091,24 @@ def tab_list():
 
     # ✅ 增加“打开详情”图标列（点击 🔎 直接弹窗）
     view_show = view_show.reset_index(drop=True)
-    view_show["Open"] = view_show["IssueID"].astype(str).apply(lambda x: f"?tab=list&issue={x}")
+    view_show["Open"] = "🔎"
 
     # ✅ Open 列放到最前面
     show_cols2 = ["Open"] + [c for c in show_cols if c != "Open"]
 
-    st.dataframe(
+    evt = st.dataframe(
         view_show[show_cols2],
         use_container_width=True,
         hide_index=True,
         height=520,
+        on_select="rerun",
+        selection_mode="single-row",
+        key="issues_table",
         column_config={
-            "Open": st.column_config.LinkColumn(
+            "Open": st.column_config.ButtonColumn(
                 " ",
-                display_text="🔎",
                 help="Open detail",
+                width="small",
             ),
             "DescriptionPreview": st.column_config.TextColumn(
                 "Description (Preview)",
@@ -1122,28 +1125,13 @@ def tab_list():
         },
     )
 
+    # ✅ 用户点了某一行（包含点 🔎 按钮）→ 直接弹窗
+    sel_rows = (evt.selection.rows or [])
+    if sel_rows:
+        iid = str(view_show.iloc[int(sel_rows[0])]["IssueID"]).strip()
+        if iid:
+            st.session_state["__open_issue_detail__"] = iid
 
-    # ✅ 支持通过 URL 参数直接打开（点击表格里的 🔎 图标会用到）
-    qp_issue = str(st.query_params.get("issue", "") or "").strip()
-    if qp_issue:
-        st.session_state["__open_issue_detail__"] = qp_issue
-        # ✅ 吃掉参数，否则你关闭弹窗后 rerun 会反复自动打开
-        try:
-            del st.query_params["issue"]
-        except Exception:
-            pass
-
-    # =========================
-    # View + Detail Panel (Dialog)
-    # =========================
-    st.markdown("### 🔍 View Single Record (Enter IssueID)")
-
-    def _open_from_input():
-        v = str(st.session_state.get("pick_issueid", "") or "").strip()
-        if v:
-            st.session_state["__open_issue_detail__"] = v
-
-    pick = st.text_input("IssueID", key="pick_issueid", on_change=_open_from_input)
 
 
     # 只加载一次 updates
