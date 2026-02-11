@@ -313,6 +313,20 @@ def replace_value_in_column(tab: str, col_name: str, old: str, new: str) -> int:
     _retry_gspread(lambda: ws.update_cells(cells))
     invalidate_cache()
     return len(to_update)
+def delete_updates_by_issueid(issue_id: str) -> int:
+    """Delete all rows in TAB_UPDATES for this IssueID. Return count."""
+    dfu_rows = load_df_with_row(TAB_UPDATES, ver("v_updates"))
+    if dfu_rows.empty or "IssueID" not in dfu_rows.columns:
+        return 0
+    hit = dfu_rows[dfu_rows["IssueID"].astype(str).str.strip() == str(issue_id).strip()]
+    if hit.empty:
+        return 0
+
+    # ✅ 从大到小删，避免行号位移
+    rows = sorted(hit["_row"].astype(int).tolist(), reverse=True)
+    for r in rows:
+        delete_row_by_rownum(TAB_UPDATES, int(r))
+    return len(rows)
 
 # =========================
 # Issue update helpers (progress / timeline)
@@ -934,6 +948,37 @@ def show_issue_detail_panel(issue_id: str, df_issues: pd.DataFrame, dfu: pd.Data
     if not r:
         st.warning("IssueID not found.")
         return
+    st.markdown("---")
+    st.markdown("### ⚠️ Danger Zone")
+
+    # 找到 issues 的 row_num
+    df_rows = load_df_with_row(TAB_ISSUES, ver("v_issues"))
+    hit = df_rows[df_rows["IssueID"].astype(str).str.strip() == str(issue_id).strip()]
+    row_num = int(hit.iloc[0]["_row"]) if (not hit.empty and "_row" in hit.columns) else None
+
+    del_updates_too = st.checkbox("Also delete ALL progress updates for this issue", value=True, key=f"chk_del_allupd_{issue_id}")
+    confirm_del = st.checkbox("I confirm I want to delete this issue", value=False, key=f"chk_del_issue_{issue_id}")
+
+    if st.button("🗑️ Delete This Issue", key=f"btn_del_issue_{issue_id}"):
+        if not row_num:
+            st.error("Cannot locate row number for this issue.")
+            st.stop()
+        if not confirm_del:
+            st.warning("Please check confirmation box first.")
+            st.stop()
+
+        if del_updates_too:
+            delete_updates_by_issueid(issue_id)
+            bump_ver("v_updates")
+
+        delete_row_by_rownum(TAB_ISSUES, int(row_num))
+        bump_ver("v_issues")
+
+        # ✅ 关闭弹窗，避免删完还弹
+        st.session_state["__open_issue_detail__"] = ""
+        st.session_state["__selected_issueid__"] = ""
+        st.success("Issue deleted.")
+        st.rerun()
 
     st.markdown(f"## {r.get('IssueID','')}: {r.get('IssueName','')}")
     c1, c2, c3 = st.columns([1.1, 1.1, 1.0])
@@ -973,16 +1018,74 @@ def show_issue_detail_panel(issue_id: str, df_issues: pd.DataFrame, dfu: pd.Data
     hist = _get_issue_updates(dfu, issue_id)
     if hist.empty:
         st.caption("No progress updates yet.")
-        return
+    else:
+        # ✅ 让每条 update 带上 row_num，支持删除
+        dfu_rows = load_df_with_row(TAB_UPDATES, ver("v_updates"))
+        dfu_rows["IssueID"] = dfu_rows["IssueID"].astype(str).str.strip()
+        hit_rows = dfu_rows[dfu_rows["IssueID"] == str(issue_id).strip()].copy()
 
-    # ✅ 表格方式（可滚动、可看全）
-    show_hist_cols = [c for c in ["UpdateAt","Status","Note","NextStep","UpdatedBy"] if c in hist.columns]
-    st.dataframe(
-        hist[show_hist_cols],
-        use_container_width=True,
-        hide_index=True,
-        height=360,
-    )
+        # 用 UpdateAt + Note 等做一个“尽量稳定”的匹配，拿到 _row
+        #（更稳的做法是 issue_updates 增加 UpdateID，但你现在没做 schema 改动，我先用轻量方式）
+        hit_rows["UpdateAt"] = hit_rows.get("UpdateAt", "").astype(str).str.strip()
+        hit_rows["Status"] = hit_rows.get("Status", "").astype(str).str.strip()
+        hit_rows["Note"] = hit_rows.get("Note", "").astype(str).str.strip()
+        hit_rows["NextStep"] = hit_rows.get("NextStep", "").astype(str).str.strip()
+        hit_rows["UpdatedBy"] = hit_rows.get("UpdatedBy", "").astype(str).str.strip()
+
+        show_hist_cols = [c for c in ["UpdateAt","Status","Note","NextStep","UpdatedBy"] if c in hit_rows.columns]
+        show_df = hit_rows[["_row"] + show_hist_cols].copy()
+        show_df = show_df.sort_values("UpdateAt", ascending=False).reset_index(drop=True)
+
+        evt_u = st.dataframe(
+            show_df[show_hist_cols],  # 不展示 _row，但我们用 selection index 去取
+            use_container_width=True,
+            hide_index=True,
+            height=300,
+            on_select="rerun",
+            selection_mode="single-row",
+            key=f"upd_table_{issue_id}",
+        )
+
+        sel_u = (evt_u.selection.rows or [])
+        if sel_u:
+            sel_idx = int(sel_u[0])
+            st.session_state["__selected_update_row__"] = int(show_df.iloc[sel_idx]["_row"])
+
+        d1, d2, d3 = st.columns([1.2, 1.2, 2.0])
+        with d1:
+            if st.button("🗑️ Delete Selected Update", key=f"btn_del_upd_{issue_id}"):
+                row_to_del = st.session_state.get("__selected_update_row__", None)
+                if not row_to_del:
+                    st.warning("Please select an update row first.")
+                else:
+                    st.session_state[f"__confirm_del_upd_{issue_id}"] = True
+                    st.rerun()
+
+        with d2:
+            if st.session_state.get(f"__confirm_del_upd_{issue_id}", False):
+                ok = st.checkbox("Confirm delete this update", key=f"chk_del_upd_{issue_id}")
+                if st.button("✅ Confirm Delete Update", key=f"btn_confirm_del_upd_{issue_id}"):
+                    if not ok:
+                        st.warning("Please check confirmation box first.")
+                    else:
+                        delete_row_by_rownum(TAB_UPDATES, int(st.session_state["__selected_update_row__"]))
+                        bump_ver("v_updates")
+                        st.session_state["__selected_update_row__"] = None
+                        st.session_state[f"__confirm_del_upd_{issue_id}"] = False
+                        st.success("Deleted update.")
+                        st.rerun()
+
+        with d3:
+            st.caption("Tip: Select a row above, then delete it.")
+
+        with st.expander("Timeline view", expanded=False):
+            # 用 hist（dfu）展示阅读友好视图
+            for _, rr in hist.iterrows():
+                st.markdown(f"- **{rr.get('UpdateAt','')}** | **{rr.get('Status','')}** | {rr.get('Note','')}")
+                ns = str(rr.get("NextStep","") or "").strip()
+                if ns:
+                    st.caption(f"Next: {ns}")
+
 
     # ✅ 时间线方式（阅读更舒服）
     with st.expander("Timeline view", expanded=False):
@@ -1116,14 +1219,28 @@ def tab_list():
         },
     )
 
-    # ✅ 用户点了某一行 → 直接弹窗
+    # ✅ 用户点某一行：只记录“选中”，不自动弹窗
     sel_rows = (evt.selection.rows or [])
     if sel_rows:
         iid = str(view_show.iloc[int(sel_rows[0])]["IssueID"]).strip()
         if iid:
-            st.session_state["__open_issue_detail__"] = iid
+            st.session_state["__selected_issueid__"] = iid
 
+    # ✅ 必须点按钮才弹窗
+    open_col1, open_col2 = st.columns([1, 3])
+    with open_col1:
+        if st.button("🔎 Open Selected", key="btn_open_selected"):
+            iid = str(st.session_state.get("__selected_issueid__", "")).strip()
+            if not iid:
+                st.warning("Please select a row first.")
+            else:
+                st.session_state["__open_issue_detail__"] = iid
+                st.rerun()
 
+    with open_col2:
+        sel_show = str(st.session_state.get("__selected_issueid__", "")).strip()
+        if sel_show:
+            st.caption(f"Selected: {sel_show}")
 
     # 只加载一次 updates
     dfu = load_updates(ver("v_updates"))
@@ -1386,6 +1503,13 @@ def main():
         key="nav_tab",
     )
     st.query_params["tab"] = tab
+    # ✅ 切换页面时，清掉弹窗/选择状态，避免回到 list 自动弹窗
+    prev_tab = st.session_state.get("__prev_tab__", "")
+    if prev_tab and prev_tab != tab:
+        st.session_state["__open_issue_detail__"] = ""
+        st.session_state["__selected_issueid__"] = ""
+        st.session_state["__selected_update_row__"] = None
+    st.session_state["__prev_tab__"] = tab
 
     if tab == "list":
         tab_list()
