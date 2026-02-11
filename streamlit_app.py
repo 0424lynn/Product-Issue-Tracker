@@ -1091,13 +1091,9 @@ def tab_list():
 
     # ✅ 增加“打开详情”图标列（点击 🔎 直接弹窗）
     view_show = view_show.reset_index(drop=True)
-    view_show["Open"] = "🔎"
-
-    # ✅ Open 列放到最前面
-    show_cols2 = ["Open"] + [c for c in show_cols if c != "Open"]
-
+    # ✅ 用“点行”触发弹窗（不需要 Open 列，不改 URL）
     evt = st.dataframe(
-        view_show[show_cols2],
+        view_show[show_cols],          # 注意：这里用 show_cols，不要 show_cols2
         use_container_width=True,
         hide_index=True,
         height=520,
@@ -1105,11 +1101,6 @@ def tab_list():
         selection_mode="single-row",
         key="issues_table",
         column_config={
-            "Open": st.column_config.ButtonColumn(
-                " ",
-                help="Open detail",
-                width="small",
-            ),
             "DescriptionPreview": st.column_config.TextColumn(
                 "Description (Preview)",
                 help="Short preview of Description.",
@@ -1125,7 +1116,7 @@ def tab_list():
         },
     )
 
-    # ✅ 用户点了某一行（包含点 🔎 按钮）→ 直接弹窗
+    # ✅ 用户点了某一行 → 直接弹窗
     sel_rows = (evt.selection.rows or [])
     if sel_rows:
         iid = str(view_show.iloc[int(sel_rows[0])]["IssueID"]).strip()
