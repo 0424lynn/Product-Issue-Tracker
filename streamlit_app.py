@@ -1137,6 +1137,18 @@ def tab_list():
     view_show["ImageLink"] = view_show.get("ImageLinks", "").apply(_first_url)
     view_show.loc[view_show["ImageLink"].astype(str).str.strip().eq(""), "ImageLink"] = None
     view_show["DescriptionPreview"] = view_show.get("Description", "").apply(lambda x: _preview_text(x, 80))
+    def _status_badge(s: str) -> str:
+        s = str(s or "").strip()
+        if s == "Open":
+            return "🟥 Open"
+        if s == "Pending Implementation":
+            return "🟨 Pending"
+        if s == "Done":
+            return "🟩 Done"
+        return s
+
+    view_show["StatusDisplay"] = view_show.get("Status", "").apply(_status_badge)
+
     # ===== Merge latest updates (progress tracking) =====
     dfu = load_updates(ver("v_updates"))
     lu = latest_update_map(dfu)
@@ -1160,7 +1172,7 @@ def tab_list():
     show_cols = [
         "IssueID","ProductCategory","Model","IssueName",
         "DescriptionPreview",
-        "Severity","IssueType","Status",
+        "Severity","IssueType","StatusDisplay",
         "LastUpdateAt",
         "LastNotePreview",
         "LastNextStepPreview",
@@ -1186,6 +1198,7 @@ def tab_list():
                 "Description (Preview)",
                 help="Short preview of Description.",
             ),
+            "StatusDisplay": st.column_config.TextColumn("Status"),
             "LastUpdateAt": st.column_config.TextColumn("Last Update"),
             "LastNotePreview": st.column_config.TextColumn("Latest Note"),
             "LastNextStepPreview": st.column_config.TextColumn("Next Step"),
