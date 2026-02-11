@@ -1224,8 +1224,9 @@ def tab_list():
                 st.warning("Please select a row first.")
             else:
                 st.session_state["__open_issue_detail__"] = iid
-                st.session_state["__open_issue_detail_opening__"] = True  # ✅ 新增：只用于“首次打开”
+                st.session_state["__open_issue_once__"] = True   # ✅ 只允许打开一次
                 st.rerun()
+
 
     with open_col2:
         sel_show = str(st.session_state.get("__selected_issueid__", "")).strip()
@@ -1236,30 +1237,29 @@ def tab_list():
     dfu = load_updates(ver("v_updates"))
 
     issue_to_open = str(st.session_state.get("__open_issue_detail__", "")).strip()
+    open_once = bool(st.session_state.get("__open_issue_once__", False))
 
-    if issue_to_open:
+    # ✅ 只有 open_once=True 才弹窗；弹完立刻复位，避免任何 rerun 再弹
+    if issue_to_open and open_once:
+        # 先复位：保证后续任何 rerun 都不会再弹
+        st.session_state["__open_issue_once__"] = False
+
         try:
             @st.dialog(f"Issue Detail: {issue_to_open}", width="large")
             def _dlg():
-                # ✅ 第一次进入弹窗时，把 opening 标记清掉（不影响后续 rerun 继续保持弹窗）
-                if st.session_state.get("__open_issue_detail_opening__", False):
-                    st.session_state["__open_issue_detail_opening__"] = False
-
                 show_issue_detail_panel(issue_to_open, df, dfu)
-
                 if st.button("Close", type="secondary"):
                     st.session_state["__open_issue_detail__"] = ""
-                    st.session_state["__open_issue_detail_opening__"] = False
                     st.rerun()
-
             _dlg()
         except Exception:
             with st.expander(f"Issue Detail (fallback): {issue_to_open}", expanded=True):
                 show_issue_detail_panel(issue_to_open, df, dfu)
                 if st.button("Close Detail", type="secondary"):
                     st.session_state["__open_issue_detail__"] = ""
-                    st.session_state["__open_issue_detail_opening__"] = False
                     st.rerun()
+
+
     # =========================
     # Quick Update
     # =========================
