@@ -386,9 +386,7 @@ def latest_update_map(dfu: pd.DataFrame) -> Dict[str, dict]:
 # =========================
 # Graph / SharePoint helpers
 # =========================
-@st.cache_resource
 def _graph_token() -> str:
-    """Client Credentials: get Graph access token"""
     url = f"https://login.microsoftonline.com/{MS_TENANT_ID}/oauth2/v2.0/token"
     data = {
         "client_id": MS_CLIENT_ID,
