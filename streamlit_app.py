@@ -1089,82 +1089,62 @@ def tab_list():
 
     show_cols = [c for c in show_cols if c in view_show.columns]
 
-    # ✅ 让 selection 行号和展示一致
+    # ✅ 增加“打开详情”图标列（点击 🔎 直接弹窗）
     view_show = view_show.reset_index(drop=True)
+    view_show["Open"] = view_show["IssueID"].astype(str).apply(lambda x: f"?tab=list&issue={x}")
 
-    # ✅ 优先使用“点击行选择”的 DataFrame（新版本 Streamlit 支持）
-    try:
-        evt = st.dataframe(
-            view_show[show_cols],
-            use_container_width=True,
-            hide_index=True,
-            height=520,
-            on_select="rerun",
-            selection_mode="single-row",
-            key="issues_table",
-            column_config={
-                "DescriptionPreview": st.column_config.TextColumn(
-                    "Description (Preview)",
-                    help="Short preview of Description. Use detail panel to see full text.",
-                ),
-                "LastUpdateAt": st.column_config.TextColumn(
-                    "Last Update",
-                    help="Latest progress update timestamp.",
-                ),
-                "LastNotePreview": st.column_config.TextColumn(
-                    "Latest Note",
-                    help="Latest progress note (preview).",
-                ),
-                "LastNextStepPreview": st.column_config.TextColumn(
-                    "Next Step",
-                    help="Latest next step (preview).",
-                ),
-                "ImageLink": st.column_config.LinkColumn(
-                    "Image Link",
-                    display_text="Open",
-                    help="Click to open SharePoint image/attachment (first link from ImageLinks).",
-                ),
-            },
-        )
+    # ✅ Open 列放到最前面
+    show_cols2 = ["Open"] + [c for c in show_cols if c != "Open"]
 
-        # ✅ 用户点了某行：直接拿 IssueID → 打开弹窗
-        sel_rows = (evt.selection.rows or [])
-        if sel_rows:
-            iid = str(view_show.iloc[int(sel_rows[0])]["IssueID"]).strip()
-            if iid:
-                st.session_state["__open_issue_detail__"] = iid
+    st.dataframe(
+        view_show[show_cols2],
+        use_container_width=True,
+        hide_index=True,
+        height=520,
+        column_config={
+            "Open": st.column_config.LinkColumn(
+                " ",
+                display_text="🔎",
+                help="Open detail",
+            ),
+            "DescriptionPreview": st.column_config.TextColumn(
+                "Description (Preview)",
+                help="Short preview of Description.",
+            ),
+            "LastUpdateAt": st.column_config.TextColumn("Last Update"),
+            "LastNotePreview": st.column_config.TextColumn("Latest Note"),
+            "LastNextStepPreview": st.column_config.TextColumn("Next Step"),
+            "ImageLink": st.column_config.LinkColumn(
+                "Image Link",
+                display_text="Open",
+                help="Open SharePoint image/attachment (first link).",
+            ),
+        },
+    )
 
-    except TypeError:
-        # 旧版 Streamlit 不支持 selection_mode/on_select：退回普通表格
-        st.dataframe(
-            view_show[show_cols],
-            use_container_width=True,
-            hide_index=True,
-            height=520,
-            column_config={
-                "DescriptionPreview": st.column_config.TextColumn("Description (Preview)"),
-                "LastUpdateAt": st.column_config.TextColumn("Last Update"),
-                "LastNotePreview": st.column_config.TextColumn("Latest Note"),
-                "LastNextStepPreview": st.column_config.TextColumn("Next Step"),
-                "ImageLink": st.column_config.LinkColumn("Image Link", display_text="Open"),
-            },
-        )
 
+    # ✅ 支持通过 URL 参数直接打开（点击表格里的 🔎 图标会用到）
+    qp_issue = str(st.query_params.get("issue", "") or "").strip()
+    if qp_issue:
+        st.session_state["__open_issue_detail__"] = qp_issue
+        # ✅ 吃掉参数，否则你关闭弹窗后 rerun 会反复自动打开
+        try:
+            del st.query_params["issue"]
+        except Exception:
+            pass
 
     # =========================
     # View + Detail Panel (Dialog)
     # =========================
     st.markdown("### 🔍 View Single Record (Enter IssueID)")
 
-    cA, cB = st.columns([1.4, 1.0])
-    with cA:
-        pick = st.text_input("IssueID", key="pick_issueid")
-    with cB:
-        open_detail = st.button("🧾 Open Detail Panel", use_container_width=True)
+    def _open_from_input():
+        v = str(st.session_state.get("pick_issueid", "") or "").strip()
+        if v:
+            st.session_state["__open_issue_detail__"] = v
 
-    # ✅ 用 session_state 记住“要打开弹窗”，避免 rerun/后续渲染把效果冲掉
-    if open_detail and pick.strip():
-        st.session_state["__open_issue_detail__"] = pick.strip()
+    pick = st.text_input("IssueID", key="pick_issueid", on_change=_open_from_input)
+
 
     # 只加载一次 updates
     dfu = load_updates(ver("v_updates"))
@@ -1188,54 +1168,6 @@ def tab_list():
                 if st.button("Close Detail", type="secondary"):
                     st.session_state["__open_issue_detail__"] = ""
                     st.rerun()
-
-    # =========================
-    # Inline details (optional)
-    # =========================
-    if pick.strip():
-        m = df[df["IssueID"].astype(str).str.strip() == pick.strip()]
-        if m.empty:
-            st.warning("IssueID not found.")
-        else:
-            r = m.iloc[0].to_dict()
-            st.markdown(f"## {r.get('IssueID','')}: {r.get('IssueName','')}")
-            st.write(f"**Category / Model**: {r.get('ProductCategory','')} / {r.get('Model','')}")
-            st.write(
-                f"**Severity**: {r.get('Severity','')} | "
-                f"**Issue Type**: {r.get('IssueType','')} | "
-                f"**Status**: {r.get('Status','')}"
-            )
-            st.write(f"**Created**: {r.get('CreatedAt','')} | **Implementation**: {r.get('ImplementDate','')}")
-
-            st.markdown("### Description"); st.write(r.get("Description",""))
-            st.markdown("### Temporary Fix"); st.write(r.get("TempFix",""))
-            st.markdown("### Improvement Plan"); st.write(r.get("ImprovePlan",""))
-
-            links = str(r.get("ImageLinks","") or "").strip()
-            if links:
-                st.markdown("### Image / Attachment Links")
-                for lk in [x.strip() for x in links.split(";") if x.strip()]:
-                    st.markdown(f"- [Open]({lk})")
-
-        # --- Progress History ✅ 必须放进 pick.strip() ---
-        if dfu.empty or "IssueID" not in dfu.columns:
-            st.caption("No progress updates yet.")
-        else:
-            hist = dfu[dfu["IssueID"].astype(str).str.strip() == pick.strip()].copy()
-            if not hist.empty:
-                hist["UpdateAt_dt"] = pd.to_datetime(hist.get("UpdateAt", ""), errors="coerce")
-                hist = hist.sort_values("UpdateAt_dt", ascending=False)
-
-                st.markdown("### Progress History")
-                for _, rr in hist.iterrows():
-                    st.markdown(
-                        f"- **{rr.get('UpdateAt','')}** | **{rr.get('Status','')}** | {rr.get('Note','')}"
-                    )
-                    ns = str(rr.get("NextStep", "") or "").strip()
-                    if ns:
-                        st.caption(f"Next: {ns}")
-            else:
-                st.caption("No progress updates yet.")
 
     # =========================
     # Quick Update
